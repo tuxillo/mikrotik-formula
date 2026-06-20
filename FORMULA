@@ -1,0 +1,16 @@
+name: mikrotik
+os: RouterOS
+os_family: RouterOS
+version: 0.0.1
+release: 1
+minimum_version: 3006
+summary: Agentless, schema-driven config management for MikroTik RouterOS
+description: >
+  Declarative RouterOS configuration management driven from a Salt master via
+  salt-sproxy (no agent, no proxy daemon on the device). Ships a librouteros
+  proxy module, a schema-driven reconciliation engine (execution module) and
+  state module supporting singleton, keyed-collection and ordered
+  (comment-tag-keyed) RouterOS paths, plus a commit-confirm router-side
+  auto-revert for lockout-risky changes. Reconciliation design derived from the
+  community.routeros Ansible collection (GPL-3.0-or-later).
+top_level_dir: mikrotik

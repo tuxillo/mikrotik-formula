@@ -1,0 +1,139 @@
+# Example pillar for the mikrotik-formula.
+#
+# All values below are PLACEHOLDERS (RFC 5737 documentation addresses, example
+# domains, redacted secrets). Copy the parts you need into a *host* pillar that
+# is mapped to your device's minion id, and replace every value.
+#
+# Two independent blocks live here:
+#   proxy:    connection details consumed by the _proxy/mikrotik.py module
+#   mikrotik: desired-state data consumed by the states under mikrotik/
+#
+# IMPORTANT: keep this host pillar PRIVATE. Encrypt the password (and any other
+# secret) with the nacl renderer; never commit a real password in plaintext.
+
+# ---------------------------------------------------------------------------
+# Connection (salt-sproxy proxy module). Use plain `#!yaml` for the host pillar
+# that carries this block -- NOT `#!yamlex` (salt-sproxy's proxytype membership
+# check fails on yamlex SLSString scalars).
+# ---------------------------------------------------------------------------
+proxy:
+  proxytype: mikrotik
+  host: 192.0.2.1
+  username: salt
+  # nacl-encrypted; the master decrypts at render time. Generate with:
+  #   salt-call --local nacl.enc 'REAL_PASSWORD' pk_file=/etc/salt/pki/master/nacl.pub
+  password: "NACL[REDACTED_BASE64_TOKEN==]"
+  port: 8728
+
+# ---------------------------------------------------------------------------
+# Desired state. Seed each path as an EXACT MIRROR of the live device (run a
+# /export or the relevant API getter) so the first `test=True` shows zero diff,
+# then evolve from there. `purge: false` everywhere is additive (safe default);
+# set `purge: true` only on a path you fully own.
+# ---------------------------------------------------------------------------
+mikrotik:
+
+  # Single-value paths -> mikrotik/system.sls (mikrotik.singleton).
+  singletons:
+    identity:
+      path: [system, identity]
+      settings:
+        name: example-router
+    clock:
+      path: [system, clock]
+      settings:
+        time-zone-name: Etc/UTC
+        time-zone-autodetect: true
+    ip_dns:
+      path: [ip, dns]
+      settings:
+        allow-remote-requests: true
+        servers: "192.0.2.53,198.51.100.53"
+
+  # Natural-key collections -> mikrotik/collections.sls (mikrotik.collection).
+  # Each entry must include the path's primary-key fields. Dynamic/builtin rows
+  # are auto-protected; `restrict` can scope matching/purge to a subset.
+  collections:
+    ip_route:
+      path: [ip, route]
+      purge: false
+      entries:
+        - {dst-address: 198.51.100.0/24, gateway: wg0}
+    ip_pool:
+      path: [ip, pool]
+      purge: false
+      entries:
+        - {name: dhcp, ranges: 192.0.2.100-192.0.2.200}
+    interface_vlan:
+      path: [interface, vlan]
+      purge: false
+      entries:
+        - {name: vlan10, interface: bridge, vlan-id: 10}
+    interface_wireguard_peers:
+      path: [interface, wireguard, peers]
+      purge: false
+      # public-key is NOT a sensitive field; private-key is and is never managed.
+      entries:
+        - {name: peer1, interface: wg0, allowed-address: 10.0.0.2/32,
+           public-key: "REPLACE_WITH_BASE64_PUBLIC_KEY="}
+
+  # /ip/address (key: address+interface) -> mikrotik/addresses.sls.
+  ip_address:
+    purge: false
+    entries:
+      - {address: 192.0.2.1/24, interface: ether2, comment: lan}
+      - {address: 10.0.0.1/24, interface: wg0}
+
+  # /ip/dns/static (key: name) -> mikrotik/dns.sls. Manage only hand-made rows;
+  # leave script-generated records (e.g. #DHCP) out and keep purge OFF.
+  dns_static:
+    purge: false
+    entries:
+      - {name: router.example.int, type: A, address: 192.0.2.1}
+      - {name: host1.example.int,  type: A, address: 192.0.2.50}
+
+  firewall:
+    # /ip/firewall/address-list -- order-independent, key: list+address.
+    address_list:
+      purge: false
+      entries:
+        - {list: VPN-LAN, address: 198.51.100.0/24}
+        - {list: SALTMASTER, address: 203.0.113.10, comment: SALTMASTER}
+
+    # Ordered paths (filter/nat/raw): NO natural key. Identity is an embedded
+    # [salt:<tag>] comment. Untagged rules are NEVER touched. The engine manages
+    # rule CONTENT only (add/update/remove) -- order is left as-is.
+    #
+    # BOOTSTRAP an existing device before seeding these, NAT first (not the
+    # lockout path), input chain LAST:
+    #   salt-sproxy --sync-all <device> mikrotik.adopt '[ip,firewall,nat]' dry_run=True
+    #   salt-sproxy --sync-all <device> mikrotik.adopt '[ip,firewall,nat]' dry_run=False
+    # then paste the emitted `rules:` here. `confirm_timeout` arms a router-side
+    # auto-revert (minutes) around the apply; ALWAYS set it on firewall paths.
+    nat:
+      confirm_timeout: 3
+      purge: false
+      rules:
+        - {tag: srcnat-001, chain: srcnat, action: masquerade,
+           src-address: 192.0.2.0/24, out-interface-list: WAN}
+        - {tag: dstnat-001, chain: dstnat, action: dst-nat, protocol: tcp,
+           dst-address-list: WAN-FROM-DOMAIN, dst-port: 443,
+           to-addresses: 192.0.2.50, to-ports: 443}
+
+    filter:
+      confirm_timeout: 3
+      purge: false
+      # Touch the input chain (the master's lifeline to the device API) LAST.
+      rules:
+        - {tag: input-001, chain: input, action: accept,
+           comment: 'accept established/related', connection-state: 'established,related'}
+        - {tag: input-002, chain: input, action: accept,
+           comment: 'allow salt master', protocol: tcp, dst-port: '4505-4506',
+           src-address-list: SALTMASTER}
+
+    raw:
+      confirm_timeout: 3
+      purge: false
+      rules:
+        - {tag: prerouting-001, chain: prerouting, action: drop,
+           src-address-list: CRAWLERS, comment: block crawlers}
