@@ -71,10 +71,11 @@ def collection(name, path, entries, purge=False, restrict=None, confirm_timeout=
         reachability is reconfirmed afterwards. Use on lockout-risky paths
         (firewall). Ignored in test mode. Default None (apply directly).
 
-    For ordered firewall paths (filter/nat/raw) the engine manages rule content
-    only; rule order is left as-is (adopted rules keep their position, new rules
-    append). Reordering is intentionally out of scope -- RouterOS ``move`` can't
-    be undone by the rollback, so it belongs to a deliberate, supervised flow.
+    For ordered firewall paths (filter/nat/raw) the engine manages rule content;
+    a new rule may carry ``place_before: <tag>`` to be inserted before an
+    existing managed rule (honored on insert only -- an existing rule is never
+    moved). Reordering an existing rule is out of scope -- RouterOS ``move``
+    can't be undone by the rollback; an insert inverts cleanly to a remove.
     """
     ret = {"name": name, "result": True, "changes": {}, "comment": ""}
     test = __opts__["test"]

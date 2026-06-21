@@ -132,9 +132,31 @@ ordered
     Identity is an embedded ``[salt:<tag>]`` comment. **Only tagged rows are
     managed; untagged hand-written rules are never matched, updated or
     purged** -- this is the ownership boundary. The engine manages rule
-    *content* only; rule *order* is left as-is (adopted rules keep their
-    position, new rules append). Reordering is intentionally out of scope:
-    RouterOS ``move`` cannot be undone by the rollback.
+    *content*; a new rule may set ``place_before: <tag>`` to be inserted at a
+    chosen position (see `Inserting a rule at a position`_). An existing rule is
+    never moved -- reordering is out of scope because RouterOS ``move`` cannot be
+    undone by the rollback, whereas an insert inverts cleanly to a remove.
+
+
+Inserting a rule at a position
+==============================
+
+By default a new ordered rule is appended. To place it at a specific spot, set
+``place_before: <tag>`` on the new rule, naming an existing managed (tagged)
+rule it should sit in front of::
+
+    - {tag: input-zabbix, chain: input, action: accept, protocol: tcp,
+       dst-port: 10050, src-address: 192.0.2.29, place_before: input-010}
+
+The anchor is resolved to its live ``.id`` and passed to RouterOS ``add`` at
+apply time. ``place_before`` is honored **only when the rule is first
+inserted** -- once it exists the engine never moves it, so applies stay
+idempotent and the commit-confirm rollback (whose inverse for an insert is a
+position-independent ``remove``) stays valid. Two new rules anchored to the same
+target keep their pillar order. The anchor must be an existing *tagged* rule; to
+insert before an untagged hand-written rule, adopt that rule first.
+``place_after`` is not supported (RouterOS has no native equivalent) -- anchor
+the following rule with ``place_before`` instead.
 
 
 Bootstrapping an existing device

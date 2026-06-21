@@ -37,6 +37,11 @@ import re
 __proxyenabled__ = ["mikrotik"]
 __virtualname__ = "mikrotik"
 
+# Keys allowed in a desired entry that are engine directives, not device fields:
+# the comment-tag identity and the placement anchor. Stripped before any write
+# or diff so they never reach RouterOS or register as a false change.
+_RESERVED = ("tag", "place_before", "place_after")
+
 
 # ---------------------------------------------------------------------------
 # Firewall field maps (shared by /ip/firewall/{filter,nat,raw}, all "ordered").
@@ -493,6 +498,13 @@ def _plan_collection(parts, schema, desired, purge, restrict):
     pks = schema["primary_keys"]
     fields = schema["fields"]
 
+    for d in desired:
+        if "place_before" in d or "place_after" in d:
+            raise ValueError(
+                "placement (place_before/place_after) is only supported on "
+                "ordered firewall paths, not /{}".format("/".join(parts))
+            )
+
     live = [r for r in __proxy__["mikrotik.path"](*parts) if not _is_dynamic_or_builtin(r)]
     if restrict:
         live = [r for r in live if _matches_restrict(r, restrict)]
@@ -544,11 +556,14 @@ def _plan_ordered(parts, schema, desired, purge=False, restrict=None):
     renders ``comment`` as ``<free text> [salt:<tag>]`` for both writing and
     comparison, so the tag is never a false diff.
 
-    Rule *content* is managed (add/update/remove); rule *order* is left as-is.
-    Rules adopted from the device keep their existing order, and new rules are
-    appended. Reordering is intentionally out of scope (see git history / the
-    Phase 2c notes): RouterOS ``move`` can't be undone by the commit-confirm
-    rollback, so order changes belong to a deliberate, supervised workflow.
+    Rule *content* is managed (add/update/remove). A NEW rule may set
+    ``place_before: <tag>`` to be inserted immediately before an existing
+    managed rule (resolved to its live ``.id`` and passed to RouterOS ``add``);
+    this is honored only on insert -- an existing rule is never moved. Reordering
+    an existing rule is intentionally out of scope: RouterOS ``move`` can't be
+    undone by the commit-confirm rollback, whereas an insert inverts cleanly to a
+    remove. Rules adopted from the device keep their existing order; a new rule
+    with no ``place_before`` is appended.
     """
     fields = schema["fields"]
     prefix = schema.get("tag_prefix", "salt:")
@@ -577,12 +592,30 @@ def _plan_ordered(parts, schema, desired, purge=False, restrict=None):
                 "ordered entry needs a tag (set 'tag:' or embed [salt:..] in "
                 "'comment'): {!r}".format(entry)
             )
-        write_entry = {k: v for k, v in entry.items() if k != "tag"}
+        if entry.get("place_after"):
+            raise ValueError(
+                "place_after is not supported; anchor the following rule with "
+                "place_before instead (entry tag {!r})".format(tag)
+            )
+        place_before = entry.get("place_before")
+        write_entry = {k: v for k, v in entry.items() if k not in _RESERVED}
         write_entry["comment"] = _render_comment(entry.get("comment"), tag, prefix)
         write_entry = _clean_for_write(write_entry, fields)
         cur = live_by_tag.get(tag)
         if cur is None:
-            changes["added"].append({"key": tag, "tag": tag, "entry": write_entry})
+            add_item = {"key": tag, "tag": tag, "entry": write_entry}
+            if place_before:
+                anchor = live_by_tag.get(str(place_before))
+                if anchor is None:
+                    raise ValueError(
+                        "place_before anchor [{0}{1}] for new rule [{0}{2}] is not "
+                        "a live managed rule on /{3}; placement anchors must be "
+                        "existing tagged rules (adopt the target first if it is "
+                        "untagged)".format(prefix, place_before, tag, "/".join(parts))
+                    )
+                add_item["place_before"] = str(place_before)
+                add_item["place_before_id"] = anchor[".id"]
+            changes["added"].append(add_item)
         else:
             matched.add(tag)
             diff = _field_diff(write_entry, cur, fields)
@@ -614,7 +647,13 @@ def _apply_ordered(parts, changes):
         data.update({f: dd["new"] for f, dd in upd["diff"].items()})
         __proxy__["mikrotik.update"](parts, data)
     for add in changes["added"]:
-        __proxy__["mikrotik.add"](parts, add["entry"])
+        data = dict(add["entry"])
+        if add.get("place_before_id"):
+            # Insert immediately before the anchor row. RouterOS `add` accepts
+            # `place-before=<.id>`; absent it, the row appends. The inverse of an
+            # add is a position-independent remove, so this stays rollback-safe.
+            data["place-before"] = add["place_before_id"]
+        __proxy__["mikrotik.add"](parts, data)
     if changes["removed"]:
         __proxy__["mikrotik.remove"](parts, [r["id"] for r in changes["removed"]])
 
